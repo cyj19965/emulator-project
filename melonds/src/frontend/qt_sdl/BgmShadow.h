@@ -1,0 +1,97 @@
+// gba-bgm: 배속과 관계없이 BGM 을 1배속으로 유지한다 (복제 코어 방식).
+//
+// 게임(ARM9)은 사운드 CPU(ARM7)에 "시퀀스 시작/정지/음량" 같은 명령을 보내고, 연주는 ARM7 의 드라이버가 한다.
+// 1) 그 명령을 지켜보다가 음악 시퀀스가 시작되면, 지금 게임 상태를 두 번째 NDS 객체(복제 코어)에 복사한다.
+// 2) 복제 코어는 ARM9 을 멈추고 ARM7 만 실제 시간(1배속)으로 돌린다. 여기서 나온 소리가 BGM 이다.
+// 3) 원본에서는 음악 플레이어의 페이더 명령 값을 무음으로 바꿔, BGM 이 소리 없이 계속 연주되게 한다.
+//    (게임이 곡의 끝이나 페이드를 기다리는 동작은 그대로 유지된다)
+// 4) 그 뒤 게임이 음악 플레이어에 보내는 명령(음량, 정지, 일시정지 등)은 복제 코어에도 전달한다.
+#ifndef BGMSHADOW_H
+#define BGMSHADOW_H
+
+#include <array>
+#include <atomic>
+#include <cstdio>
+#include <deque>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "types.h"
+
+namespace melonDS
+{
+class NDS;
+}
+class EmuInstance;
+
+class BgmShadow
+{
+public:
+    explicit BgmShadow(EmuInstance* inst);
+    ~BgmShadow();
+
+    // 끄면 원본 멜론DS 와 똑같이 동작한다. 바꾼 설정은 다음 곡부터 적용된다.
+    void setEnabled(bool on);
+    bool isEnabled() const { return enabled; }
+
+    // 에뮬레이션 스레드: 원본 코어가 프레임 하나를 돌린 뒤
+    void afterMainFrame();
+    // 오디오 스레드: 복제 코어의 소리를 출력에 더한다
+    void mixInto(melonDS::s16* stream, int frames, int volume);
+
+private:
+    struct SeqInfo
+    {
+        int group = -1;  // (사운드 아카이브, 플레이어 번호) 묶음
+        int tracks = 0;
+        bool loop = false;
+        std::string name;
+    };
+    struct Command
+    {
+        melonDS::u32 id;
+        melonDS::u32 arg[4];
+    };
+    struct Player
+    {
+        bool music = false;    // 음악 시퀀스를 재생 중인 플레이어
+        bool playing = false;
+        melonDS::s32 fader = 0;  // 게임이 의도한 페이더 값 (원본에는 무음 값을 대신 넣는다)
+        std::string name;
+    };
+
+    static void fifoHook(melonDS::NDS& nds, melonDS::u32 word);
+    void onSoundFifo(melonDS::u32 word);
+    void resetTracking();
+    void indexCart();
+    bool classify(melonDS::u32 seqBase, std::string& name);
+    void forward(const Command& cmd);
+    void cloneNow();
+    void injectQueued();
+    void log(const char* fmt, ...);
+
+    EmuInstance* inst;
+    std::atomic<bool> enabled{true};
+
+    // 원본 코어 추적 (에뮬레이션 스레드 전용)
+    melonDS::NDS* lastNds = nullptr;
+    melonDS::u32 lastFrame = 0;
+    melonDS::u32 cartChecksum = 0;
+    bool cartIndexed = false;
+    std::array<Player, 16> players{};
+    bool cloneRequested = false;
+    std::unordered_map<melonDS::u32, SeqInfo> seqIndex;  // CRC32(SSEQ 파일) -> 정보
+    std::vector<bool> groupIsMusic;
+
+    // 복제 코어
+    std::atomic<melonDS::NDS*> shadow{nullptr};
+    std::atomic<bool> active{false};  // 복제 코어가 BGM 을 내는 중
+    std::deque<Command> queue;        // 복제 코어에 전달할 명령
+    melonDS::u32 ringPos = 0;
+    int idleFrames = 0;
+
+    FILE* logFile = nullptr;
+};
+
+#endif // BGMSHADOW_H

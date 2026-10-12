@@ -1,0 +1,63 @@
+diff --git a/src/NDS.cpp b/src/NDS.cpp
+index f45051e..b841a26 100644
+--- a/src/NDS.cpp
++++ b/src/NDS.cpp
+@@ -44,11 +44,50 @@
+ #include "DSi_DSP.h"
+ #include "ARMJIT.h"
+ #include "ARMJIT_Memory.h"
++#include "CRC32.h"
+ 
+ namespace melonDS
+ {
+ using namespace Platform;
+ 
++// gba-bgm 임시 진단: 게임(ARM9)이 사운드 CPU(ARM7)로 보내는 명령 목록을 기록한다.
++// PXI FIFO 값은 (데이터 << 6) | 태그 이고, 사운드(태그 7)의 데이터는 명령 목록의 주소로 가정한다.
++// 명령은 {u32 next, u32 id, u32 arg[4]} 연결 목록으로 가정한다. 가정이 틀리면 기록이 깨져 보인다.
++static void TraceSoundCommands(NDS& nds, u32 fifoword)
++{
++    if ((fifoword & 0x1F) != 7) return;
++    static FILE* f = fopen("sndcmd_trace.txt", "w");
++    if (!f) return;
++
++    u32 addr = fifoword >> 6;
++    fprintf(f, "[frame %u] fifo %08X list %08X\n", nds.NumFrames, fifoword, addr);
++    for (int n = 0; n < 256 && addr >= 0x02000000 && addr < 0x02400000 - 24; n++)
++    {
++        u32 w[6];
++        memcpy(w, &nds.MainRAM[addr & nds.MainRAMMask], sizeof(w));
++        fprintf(f, "  cmd %2u args %08X %08X %08X %08X", w[1], w[2], w[3], w[4], w[5]);
++        if (w[1] == 0 || w[1] == 2)
++        {
++            // 시퀀스 시작/준비로 가정: 인자 = 플레이어, 시퀀스 데이터 주소, 오프셋, 뱅크 주소
++            const u32 base = w[3];
++            if (base >= 0x02000000 + 0x1C && base < 0x02400000)
++            {
++                const u8* s = &nds.MainRAM[(base - 0x1C) & nds.MainRAMMask];
++                u32 size;
++                memcpy(&size, s + 8, 4);
++                if (!memcmp(s, "SSEQ", 4) && size < 0x100000)
++                    fprintf(f, "  SSEQ size %u crc %08X", size, CRC32(s, (int)size));
++                else
++                    fprintf(f, "  head %02X%02X%02X%02X %02X%02X%02X%02X", s[0], s[1], s[2], s[3],
++                            s[0x1C], s[0x1D], s[0x1E], s[0x1F]);
++            }
++        }
++        fprintf(f, "\n");
++        addr = w[0];
++    }
++    fflush(f);
++}
++
+ const s32 kMaxIterationCycles = 64;
+ const s32 kIterationCycleMargin = 8;
+ 
+@@ -3575,6 +3614,7 @@ void NDS::ARM9IOWrite32(u32 addr, u32 val)
+             {
+                 bool wasempty = IPCFIFO9.IsEmpty();
+                 IPCFIFO9.Write(val);
++                TraceSoundCommands(*this, val);  // gba-bgm 임시 진단
+                 if ((IPCFIFOCnt7 & 0x0400) && wasempty)
+                     SetIRQ(1, IRQ_IPCRecv);
+             }
