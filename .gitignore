@@ -1,0 +1,20 @@
+# 빌드 결과물
+build/
+dist/
+*.exe
+*.dll
+*.o
+*.obj
+
+# ROM과 세이브 (올리지 않음)
+*.gba
+*.gb
+*.gbc
+*.nds
+*.3ds
+*.cia
+*.cci
+*.sav
+*.srm
+*.ss[0-9]
+*.mln
