@@ -43,8 +43,8 @@ select { font: 14px var(--f-body); padding: 5px 6px; border-radius: 7px; }
 .cell.low { box-shadow: 0 0 0 2px var(--warn); }
 .cell.sel { outline: 3px solid var(--fg); outline-offset: 1px; }
 .rect { border-radius: 6px; pointer-events: none; z-index: 2; }
-.rect.now { border: 3px solid var(--mark); background: color-mix(in srgb, var(--mark) 18%, transparent); margin: -4px; }
-.rect.next { border: 2px dashed var(--muted); margin: -2px; }
+.rect.now { border: 2px solid var(--mark); background: color-mix(in srgb, var(--mark) 22%, transparent); margin: 0; }
+.rect.next { border: 2px dashed var(--muted); margin: 0; }
 [hidden] { display: none !important; }
 .hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
 ol.moves { margin: 0; padding: 0; list-style: none; max-height: 260px; overflow-y: auto; font-family: var(--f-mono); font-size: 12px; }

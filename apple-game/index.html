@@ -58,8 +58,8 @@ h1 { font-family: var(--f-display); font-weight: 800; font-size: 26px; margin: 0
 .cell.sel { outline: 3px solid var(--fg); outline-offset: 1px; }
 .cell:focus-visible { outline: 3px solid var(--fg); outline-offset: 1px; }
 .rect { border-radius: 8px; pointer-events: none; z-index: 2; }
-.rect.now { border: 4px solid var(--mark); background: color-mix(in srgb, var(--mark) 18%, transparent); margin: -5px; }
-.rect.next { border: 2px dashed var(--muted); margin: -3px; }
+.rect.now { border: 3px solid var(--mark); background: color-mix(in srgb, var(--mark) 22%, transparent); margin: 0; }
+.rect.next { border: 2px dashed var(--muted); margin: 0; }
 .hint { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
 .rail { display: grid; gap: 12px; min-width: 0; }
 .card { background: var(--panel); border-radius: 14px; padding: 14px; display: grid; gap: 10px; }
@@ -205,7 +205,7 @@ const FS = 16;
 const SAMPLE = "51895519685894171 54628883965366978 56884222281481956 31115161731775352 74312428573545526 66734483561764226 18416549663188662 36539188788526178 94418525311175689 78436764646545162";
 
 const $ = id => document.getElementById(id);
-const state = { R: 10, C: 17, board: [], low: new Set(), moves: [], score: 0, step: 0, sel: -1, solving: false };
+const state = { R: 10, C: 17, board: [], low: new Set(), moves: [], steps: [], score: 0, step: 0, sel: -1, solving: false };
 
 // ---------- recognition ----------
 function findApples(px, w, h) {
@@ -307,7 +307,7 @@ $("workers").textContent = `병렬 탐색 ${NW}개 동시 실행. 탐색 시간�
 function solve(prefix = "") {
   const { R, C, board } = state;
   const budget = +$("budget").value, deadline = Date.now() + budget, t0 = performance.now();
-  state.solving = true; state.moves = []; state.step = 0; render();
+  state.solving = true; state.moves = []; state.steps = []; state.step = 0; render();
   setStatus(`탐색 중… (${budget / 1000}초)`);
   let left = NW, best = { score: -1, moves: [] }, runs = 0;
   for (let k = 0; k < NW; k++) {
@@ -317,7 +317,7 @@ function solve(prefix = "") {
       if (e.data.score > best.score) best = e.data;
       w.terminate();
       if (--left === 0) {
-        state.solving = false; state.moves = orderMoves(best.moves); state.score = best.score; state.step = 0;
+        state.solving = false; state.moves = orderMoves(best.moves); state.steps = buildSteps(state.moves); state.score = best.score; state.step = 0;
         setStatus(`${prefix}${((performance.now() - t0) / 1000).toFixed(1)}초 탐색 · ${best.moves.length}수 · 시도 ${runs}회`);
         render();
       }
@@ -343,7 +343,7 @@ function loadBoard(board, R, C, low, msg) {
 }
 
 function buildBoard() {
-  const { R, C, board } = state, el = $("board");
+  const { R, C } = state, el = $("board");
   el.style.gridTemplateColumns = `repeat(${C}, minmax(0, 1fr))`;
   el.innerHTML = "";
   for (let i = 0; i < R * C; i++) {
@@ -353,45 +353,63 @@ function buildBoard() {
     b.setAttribute("aria-label", `${((i / C) | 0) + 1}행 ${(i % C) + 1}열`);
     el.appendChild(b);
   }
-  for (const cls of ["now", "next"]) { const d = document.createElement("div"); d.className = "rect " + cls; d.id = "rect-" + cls; el.appendChild(d); }
   render();
 }
 
+// One step shows every solid rectangle at once (they are independent); each later move is its own step.
+function buildSteps(moves) {
+  const solid = m => (m[2] - m[0] + 1) * (m[3] - m[1] + 1) === m[4];
+  let n = 0; while (n < moves.length && solid(moves[n])) n++;
+  const steps = n ? [Array.from({ length: n }, (_, i) => i)] : [];
+  for (let i = n; i < moves.length; i++) steps.push([i]);
+  return steps;
+}
+
 function render() {
-  const { R, C, board, moves, step, low, sel } = state;
-  const gone = new Uint8Array(R * C);
-  for (let s = 0; s < step && s < moves.length; s++) { const m = moves[s]; for (let r = m[0]; r <= m[2]; r++) for (let c = m[1]; c <= m[3]; c++) gone[r * C + c] = 1; }
+  const { R, C, board, moves, steps, step, low, sel } = state;
+  const gone = new Uint8Array(R * C), stepOf = [];
+  steps.forEach((s, k) => s.forEach(i => { stepOf[i] = k; }));
   let removed = 0;
-  for (let s = 0; s < step; s++) removed += moves[s][4];
-  $("board").querySelectorAll(".cell").forEach(b => {
+  moves.forEach((m, i) => {
+    if (stepOf[i] >= step) return;
+    removed += m[4];
+    for (let r = m[0]; r <= m[2]; r++) for (let c = m[1]; c <= m[3]; c++) gone[r * C + c] = 1;
+  });
+  const el = $("board");
+  el.querySelectorAll(".cell").forEach(b => {
     const i = +b.dataset.i, v = board[i];
     b.textContent = v || "";
     b.className = "cell" + (!v ? " empty" : gone[i] ? " gone" : "") + (low.has(i) ? " low" : "") + (sel === i ? " sel" : "");
   });
-  const place = (id, m) => {
-    const d = $(id); d.hidden = !m;
-    if (m) d.style.gridArea = `${m[0] + 1} / ${m[1] + 1} / ${m[2] + 2} / ${m[3] + 2}`;
+  el.querySelectorAll(".rect").forEach(d => d.remove());
+  const place = (cls, m) => {
+    const d = document.createElement("div"); d.className = "rect " + cls;
+    d.style.gridArea = `${m[0] + 1} / ${m[1] + 1} / ${m[2] + 2} / ${m[3] + 2}`;
+    el.appendChild(d);
   };
-  place("rect-now", moves[step]); place("rect-next", moves[step + 1]);
+  (steps[step] || []).forEach(i => place("now", moves[i]));
+  (steps[step + 1] || []).forEach(i => place("next", moves[i]));
   const total = board.filter(v => v).length;
-  $("score").innerHTML = state.solving ? `… <small>/ ${total}</small>` : `${state.score} <small>/ ${total}</small>`;
-  $("stepinfo").textContent = moves.length ? `${Math.min(step + 1, moves.length)} / ${moves.length} 수 · 현재 ${removed}점` : (state.solving ? "탐색 중…" : "–");
-  const m = moves[step];
-  $("cur").textContent = m ? `${m[0] + 1}~${m[2] + 1}행, ${m[1] + 1}~${m[3] + 1}열 · 사과 ${m[4]}개` : (moves.length ? "끝. 더 지울 수 있는 사각형이 없습니다." : "–");
-  $("prev").disabled = step === 0; $("next").disabled = step >= moves.length;
+  $("score").innerHTML = state.solving ? `… <small>/ ${total}</small>` : board.length ? `${state.score} <small>/ ${total}</small>` : "– <small>/ –</small>";
+  $("stepinfo").textContent = steps.length ? `${Math.min(step + 1, steps.length)} / ${steps.length} 단계 · 현재 ${removed}점` : (state.solving ? "탐색 중…" : "–");
+  const cur = (steps[step] || []).map(i => moves[i]);
+  $("cur").textContent = cur.length > 1 ? `꽉 찬 사각형 ${cur.length}개 한꺼번에 · 사과 ${cur.reduce((a, m) => a + m[4], 0)}개`
+    : cur.length ? `${cur[0][0] + 1}~${cur[0][2] + 1}행, ${cur[0][1] + 1}~${cur[0][3] + 1}열 · 사과 ${cur[0][4]}개`
+    : (moves.length ? "끝. 더 지울 수 있는 사각형이 없습니다." : "–");
+  $("prev").disabled = step === 0; $("next").disabled = step >= steps.length;
   const ol = $("moves");
   if (ol.childElementCount !== moves.length) {
     ol.innerHTML = moves.map((m, k) => `<li data-k="${k}"><span>${k + 1}.</span><span>${m[0] + 1}-${m[2] + 1}행 ${m[1] + 1}-${m[3] + 1}열</span><span>+${m[4]}</span></li>`).join("");
   }
-  ol.querySelectorAll("li").forEach((li, k) => { li.classList.toggle("done", k < step); li.classList.toggle("on", k === step); });
-  const on = ol.children[step]; if (on) on.scrollIntoView({ block: "nearest" });
+  ol.querySelectorAll("li").forEach((li, k) => { li.classList.toggle("done", stepOf[k] < step); li.classList.toggle("on", stepOf[k] === step); });
+  const on = ol.children[(steps[step] || [])[0]]; if (on) on.scrollIntoView({ block: "nearest" });
 }
 
-function go(d) { const s = Math.max(0, Math.min(state.moves.length, state.step + d)); if (s !== state.step) { state.step = s; render(); } }
+function go(d) { const s = Math.max(0, Math.min(state.steps.length, state.step + d)); if (s !== state.step) { state.step = s; render(); } }
 $("next").onclick = () => go(1);
 $("prev").onclick = () => go(-1);
 $("resolve").onclick = () => { if (!state.solving) solve(); };
-$("moves").onclick = e => { const li = e.target.closest("li"); if (li) { state.step = +li.dataset.k; render(); } };
+$("moves").onclick = e => { const li = e.target.closest("li"); if (li) { state.step = state.steps.findIndex(s => s.includes(+li.dataset.k)); render(); } };
 $("board").onclick = e => {
   const b = e.target.closest(".cell"); if (!b) return;
   state.sel = state.sel === +b.dataset.i ? -1 : +b.dataset.i; render();
