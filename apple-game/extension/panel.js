@@ -32,6 +32,14 @@ async function handleImage(blob) {
 }
 
 // ---------- solving ----------
+// Solid rectangles (no empty cell inside) need no earlier move, so they go first in
+// top-left order (row, then column); moves that span emptied cells keep their order after them.
+function orderMoves(moves) {
+  const solid = m => (m[2] - m[0] + 1) * (m[3] - m[1] + 1) === m[4];
+  const first = moves.filter(solid).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  return first.concat(moves.filter(m => !solid(m)));
+}
+
 function solve(prefix = "") {
   const { R, C, board } = state;
   const budget = +$("budget").value, deadline = Date.now() + budget, t0 = performance.now();
@@ -46,7 +54,7 @@ function solve(prefix = "") {
       if (e.data.score > best.score) best = e.data;
       w.terminate();
       if (--left === 0) {
-        state.solving = false; state.moves = best.moves; state.score = best.score; state.step = 0;
+        state.solving = false; state.moves = orderMoves(best.moves); state.score = best.score; state.step = 0;
         $("capture").disabled = $("resolve").disabled = false;
         setStatus(`${prefix}${((performance.now() - t0) / 1000).toFixed(1)}초 탐색 · ${best.moves.length}수`);
         render();
