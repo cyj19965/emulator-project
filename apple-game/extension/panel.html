@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>사과게임 풀이기</title>
+<link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header>
+    <h1>사과게임 풀이기</h1>
+    <button class="btn primary" id="capture" type="button">캡처 &amp; 풀기</button>
+    <div class="row">
+      <label for="budget">탐색 시간</label>
+      <select id="budget">
+        <option value="1000">1초</option>
+        <option value="2000">2초</option>
+        <option value="3000" selected>3초</option>
+        <option value="5000">5초</option>
+        <option value="10000">10초</option>
+      </select>
+      <button class="btn" id="resolve" type="button">다시 풀기</button>
+    </div>
+    <p id="status">게임 탭을 연 상태에서 「캡처 &amp; 풀기」를 누르세요.</p>
+    <div class="warnbox" id="warn" hidden></div>
+  </header>
+
+  <section class="card">
+    <div class="scoreline">
+      <div class="score" id="score">– <small>/ –</small></div>
+      <div class="step" id="stepinfo">–</div>
+    </div>
+    <div class="cur" id="cur">–</div>
+    <div class="row">
+      <button class="btn" id="prev" type="button">← 이전</button>
+      <button class="btn primary grow" id="next" type="button">다음 (Space)</button>
+    </div>
+  </section>
+
+  <section class="boardbox">
+    <div class="board" id="board"></div>
+    <p class="hint">노란 사각형을 드래그하세요. 점선은 그다음 수입니다. 잘못 읽은 칸은 클릭 후 숫자 키(1–9, 0=빈칸)로 고칩니다. 주황 테두리는 인식 확신도가 낮은 칸입니다.</p>
+  </section>
+
+  <section class="card">
+    <span class="label">전체 순서 (행, 열은 1부터)</span>
+    <ol class="moves" id="moves"></ol>
+  </section>
+
+  <script src="recognize.js"></script>
+  <script src="panel.js"></script>
+</body>
+</html>

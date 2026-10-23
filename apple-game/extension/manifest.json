@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "사과게임 풀이기",
+  "version": "1.0.0",
+  "description": "사과게임(Fruit Box) 화면을 캡처해 숫자를 인식하고, 높은 점수가 나오는 드래그 순서를 사이드패널에 보여줍니다.",
+  "permissions": ["sidePanel"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "side_panel": { "default_path": "panel.html" },
+  "action": { "default_title": "사과게임 풀이기 열기", "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" } },
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+}

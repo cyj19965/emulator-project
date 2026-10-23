@@ -1,0 +1,53 @@
+:root {
+  --bg: #eef3ef; --panel: #ffffff; --grid: #d7e6da; --fg: #1d2a22; --muted: #5c6e62;
+  --apple: #e8343a; --apple-fg: #ffffff; --leaf: #12a150; --leaf-soft: #d5f0df;
+  --mark: #f5b800; --warn: #b85c00; --warn-bg: #fff1dc; --gone: #c9d6cc;
+  --f-body: "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  --f-mono: ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #121a15; --panel: #1b261f; --grid: #26352b; --fg: #e4efe7; --muted: #94a89a;
+  --apple: #ef4a4f; --leaf: #3fcf7c; --leaf-soft: #1f3a29; --mark: #ffcb2e;
+  --warn: #ffb35c; --warn-bg: #3a2a14; --gone: #2c3b31; color-scheme: dark } }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 12px; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--f-body); display: grid; gap: 10px; }
+header { display: grid; gap: 8px; }
+h1 { margin: 0; font-size: 18px; font-weight: 800; color: var(--apple); }
+#status { margin: 0; font-weight: 600; }
+#status.err { color: var(--warn); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.btn { font: 600 14px var(--f-body); border-radius: 9px; border: 0; padding: 9px 12px; cursor: pointer; background: var(--leaf-soft); color: var(--fg); }
+.btn.primary { background: var(--leaf); color: #fff; }
+.btn.grow { flex: 1; }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn:focus-visible, .cell:focus-visible { outline: 3px solid var(--fg); outline-offset: 2px; }
+#capture { font-size: 16px; padding: 12px; }
+select { font: 14px var(--f-body); padding: 5px 6px; border-radius: 7px; }
+.card { background: var(--panel); border-radius: 12px; padding: 12px; display: grid; gap: 8px; }
+.scoreline { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.score { font-size: 36px; font-weight: 800; line-height: 1; color: var(--leaf); font-variant-numeric: tabular-nums; }
+.score small { font-size: 15px; color: var(--muted); }
+.step { font-family: var(--f-mono); font-size: 13px; color: var(--muted); }
+.cur { font-family: var(--f-mono); font-size: 14px; background: var(--leaf-soft); border-radius: 8px; padding: 7px 9px; }
+.label { font-size: 12px; color: var(--muted); font-weight: 600; }
+.warnbox { background: var(--warn-bg); color: var(--warn); border-radius: 9px; padding: 7px 9px; font-size: 13px; }
+.boardbox { background: var(--panel); border-radius: 14px; padding: 8px; border: 4px solid var(--leaf); }
+.board { display: grid; gap: 2px; position: relative; user-select: none;
+  background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 8px 8px; }
+.cell { aspect-ratio: 1; border-radius: 50%; display: grid; place-items: center; background: var(--apple); color: var(--apple-fg);
+  font-weight: 800; font-size: clamp(9px, 3.2vw, 18px); font-variant-numeric: tabular-nums; border: 0; padding: 0; cursor: pointer; position: relative; z-index: 1; }
+.cell.gone { background: transparent; color: var(--gone); box-shadow: inset 0 0 0 1px var(--gone); }
+.cell.empty { background: transparent; color: transparent; box-shadow: inset 0 0 0 1px var(--gone); }
+.cell.low { box-shadow: 0 0 0 2px var(--warn); }
+.cell.sel { outline: 3px solid var(--fg); outline-offset: 1px; }
+.rect { border-radius: 6px; pointer-events: none; z-index: 2; }
+.rect.now { border: 3px solid var(--mark); background: color-mix(in srgb, var(--mark) 18%, transparent); margin: -4px; }
+.rect.next { border: 2px dashed var(--muted); margin: -2px; }
+[hidden] { display: none !important; }
+.hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+ol.moves { margin: 0; padding: 0; list-style: none; max-height: 260px; overflow-y: auto; font-family: var(--f-mono); font-size: 12px; }
+ol.moves li { display: grid; grid-template-columns: 30px 1fr auto; gap: 6px; padding: 2px 6px; border-radius: 6px; cursor: pointer; }
+ol.moves li.done { color: var(--muted); text-decoration: line-through; }
+ol.moves li.on { background: color-mix(in srgb, var(--mark) 28%, transparent); text-decoration: none; }
