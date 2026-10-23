@@ -231,10 +231,7 @@ async function autoRun() {
     if (state.R !== 10 || state.C !== 17)
       throw new Error(`판이 ${state.R}행 × ${state.C}열만 보입니다. 디버깅 안내 띠 때문에 화면이 줄었을 수 있으니, 창을 키우거나 스크롤해서 판 전체가 보이게 한 뒤 다시 눌러 주세요.`);
     if (!state.moves.length) throw new Error("풀이를 만들지 못했습니다.");
-    // captured pixels -> CSS pixels. devicePixelRatio (includes page zoom) is not thrown off by a
-    // scrollbar the way innerWidth is; fall back to the width ratio if the capture was scaled.
-    const kDpr = 1 / view.dpr, kW = view.w / boxes.w;
-    const k = Math.abs(boxes.w * kDpr - view.w) <= 40 ? kDpr : kW;
+    const k = await calibrate(dbg, tab, view);
     // Drag the whole plan, then look at the real board: apples a drag missed are still there, so
     // re-solve from what is left (1 s search) and drag again until no rectangle is left or nothing changes.
     let total = 0, round = 1;
@@ -274,6 +271,7 @@ async function autoRun() {
   } catch (e) {
     setStatus("자동 실행 오류: " + e.message, true);
   } finally {
+    await chrome.debugger.sendCommand(dbg, "Runtime.evaluate", { expression: UNGUARD }).catch(() => {});
     chrome.debugger.detach(dbg).catch(() => {});
     auto.running = false;
     $("auto").textContent = "자동 실행";
@@ -292,7 +290,51 @@ async function waitStable(dbg) {
   }
   return { w: last[0], h: last[1], dpr: last[2] };
 }
+// Measures how captured pixels map to the mouse coordinates the debugger uses: draws two blue
+// squares at known mouse coordinates on top of the page, captures, and finds them in the image.
+async function calibrate(dbg, tab, view) {
+  const A = [80, 80], B = [view.w - 80, view.h - 80];
+  const js = `(() => { const box = document.createElement("div"); box.id = "__apple_cal";
+    box.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none";
+    for (const [x, y] of ${JSON.stringify([A, B])}) { const d = document.createElement("div");
+      d.style.cssText = "position:fixed;width:16px;height:16px;background:#0000ff;left:" + (x - 8) + "px;top:" + (y - 8) + "px";
+      box.appendChild(d); }
+    document.documentElement.appendChild(box); })()`;
+  await chrome.debugger.sendCommand(dbg, "Runtime.evaluate", { expression: js });
+  await sleep(150);
+  try {
+    const url = await captureTab(tab.windowId, { format: "png" });
+    const bmp = await createImageBitmap(await (await fetch(url)).blob());
+    const cv = new OffscreenCanvas(bmp.width, bmp.height), ctx = cv.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(bmp, 0, 0);
+    const px = ctx.getImageData(0, 0, bmp.width, bmp.height).data;
+    // centroid of the blue pixels in each half of the image
+    const acc = [[0, 0, 0], [0, 0, 0]];
+    for (let y = 0; y < bmp.height; y++) for (let x = 0; x < bmp.width; x++) {
+      const p = (y * bmp.width + x) * 4;
+      if (px[p + 2] > 200 && px[p] < 40 && px[p + 1] < 40) { const a = acc[x < bmp.width / 2 ? 0 : 1]; a[0] += x; a[1] += y; a[2]++; }
+    }
+    if (!acc[0][2] || !acc[1][2]) throw new Error("보정 표시를 찾지 못했습니다.");
+    const [ax, ay] = [acc[0][0] / acc[0][2], acc[0][1] / acc[0][2]], [bx, by] = [acc[1][0] / acc[1][2], acc[1][1] / acc[1][2]];
+    const kx = (B[0] - A[0]) / (bx - ax), ky = (B[1] - A[1]) / (by - ay);
+    const cal = { kx, ky, ox: A[0] - kx * ax, oy: A[1] - ky * ay };
+    $("calinfo").textContent = `좌표 보정: 배율 ${kx.toFixed(3)} × ${ky.toFixed(3)}, 이동 ${cal.ox.toFixed(1)}, ${cal.oy.toFixed(1)} (devicePixelRatio ${view.dpr})`;
+    return cal;
+  } finally {
+    await chrome.debugger.sendCommand(dbg, "Runtime.evaluate", { expression: `document.getElementById("__apple_cal")?.remove()` });
+  }
+}
+// A text selection or a native drag-and-drop on the page swallows the mouse release of a drag,
+// so while auto run is on, the page cannot select or drag-and-drop, and each round starts with no selection.
+const GUARD = `(() => { if (!window.__appleGuard) { window.__appleGuard = true;
+  const st = document.createElement("style"); st.id = "__apple_guard";
+  st.textContent = "*{user-select:none!important;-webkit-user-select:none!important;-webkit-user-drag:none!important}";
+  document.documentElement.appendChild(st);
+  for (const t of ["dragstart", "selectstart"]) addEventListener(t, e => { if (window.__appleGuard) e.preventDefault(); }, true); }
+  window.__appleGuard = true; getSelection().removeAllRanges(); })()`;
+const UNGUARD = `(() => { window.__appleGuard = false; document.getElementById("__apple_guard")?.remove(); })()`;
 async function dragAll(dbg, boxes, k, round) {
+  await chrome.debugger.sendCommand(dbg, "Runtime.evaluate", { expression: GUARD });
   const { rows, cols } = boxes;
   const px = cols.length > 1 ? (cols[cols.length - 1] - cols[0]) / (cols.length - 1) : 40;
   const py = rows.length > 1 ? (rows[rows.length - 1] - rows[0]) / (rows.length - 1) : 40;
@@ -303,7 +345,8 @@ async function dragAll(dbg, boxes, k, round) {
     done.push(i);
     const m = state.moves[i];
     // from just outside the top-left apple to just outside the bottom-right one, staying clear of neighbours
-    await drag(dbg, (cols[m[1]] - px * 0.45) * k, (rows[m[0]] - py * 0.45) * k, (cols[m[3]] + px * 0.45) * k, (rows[m[2]] + py * 0.45) * k);
+    const X = x => x * k.kx + k.ox, Y = y => y * k.ky + k.oy;
+    await drag(dbg, X(cols[m[1]] - px * 0.45), Y(rows[m[0]] - py * 0.45), X(cols[m[3]] + px * 0.45), Y(rows[m[2]] + py * 0.45));
     setStatus(`${round}번째 바퀴 · 자동 드래그 ${++n} / ${order.length}`);
     await sleep(+$("gap").value);
   }
