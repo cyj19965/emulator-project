@@ -62,7 +62,7 @@ function startTracking(tab, boxes) {
     try {
       const [cur] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
       if (!cur || cur.id !== tab.id) return setLive("게임 탭이 앞에 있을 때만 판을 따라갑니다.");
-      const r = await readBoard(tab, boxes, i => state.live[i]);
+      const r = await readBoard(tab, boxes, i => state.live[i] || !state.board[i]);
       if (r.error) return setLive(r.error);
       const { absent, present } = r;
       // a single drag removes few apples; a mass disappearance means the board is hidden or scrolled
@@ -71,7 +71,9 @@ function startTracking(tab, boxes) {
       let changed = false;
       for (let i = 0; i < miss.length; i++) miss[i] = absent.includes(i) ? miss[i] + 1 : 0;
       for (const i of absent) if (miss[i] >= 2 && !state.live[i]) { state.live[i] = 1; changed = true; }
-      if (changed) { autoStep(); render(); }
+      const was = state.offTicks >= 3;
+      state.offTicks = offPlan() ? (state.offTicks || 0) + 1 : 0;
+      if (changed || was !== (state.offTicks >= 3)) { autoStep(); render(); }
     } catch (e) {
       setLive("판을 따라가지 못했습니다: " + e.message);
     } finally {
@@ -84,9 +86,13 @@ function startTracking(tab, boxes) {
 async function readBoard(tab, boxes, skip = () => false) {
   const url = await captureTab(tab.windowId, { format: "jpeg", quality: 70 });
   const bmp = await createImageBitmap(await (await fetch(url)).blob());
-  if (bmp.width !== boxes.w || bmp.height !== boxes.h) return { error: "창 크기가 바뀌었습니다. 「캡처 & 풀기」를 다시 눌러 주세요." };
   const cv = new OffscreenCanvas(bmp.width, bmp.height), ctx = cv.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(bmp, 0, 0);
+  if (bmp.width !== boxes.w || bmp.height !== boxes.h) {
+    // the view changed size (e.g. the debugging bar came or went): find where the board moved
+    if (!realign(ctx, bmp.width, bmp.height, boxes, skip))
+      return { error: "화면이 바뀌어 판 위치를 찾지 못했습니다. 「캡처 & 풀기」를 다시 눌러 주세요." };
+  }
   const absent = [];
   let present = 0;
   boxes.cells.forEach((b, i) => {
@@ -98,12 +104,62 @@ async function readBoard(tab, boxes, skip = () => false) {
   });
   return { absent, present };
 }
+// Shifts the remembered apple positions to where the remaining apples now are in a capture of a
+// different size. Tries every offset up to 160 px vertically and 80 px sideways and keeps the one
+// where the most expected apples show red on both sides of their digit.
+function realign(ctx, w, h, boxes, skip) {
+  const px = ctx.getImageData(0, 0, w, h).data;
+  const red = (x, y) => {
+    if (x < 0 || y < 0 || x >= w || y >= h) return false;
+    const p = (y * w + x) * 4;
+    return px[p] > 150 && px[p] - px[p + 1] > 90 && px[p] - px[p + 2] > 90;
+  };
+  const pts = [];
+  boxes.cells.forEach((b, i) => {
+    if (!b || skip(i)) return;
+    const bw = b[2] - b[0], bh = b[3] - b[1], y = Math.round(b[1] + bh * 0.6);
+    pts.push([Math.round(b[0] + bw * 0.18), y, Math.round(b[2] - bw * 0.18), y]);
+  });
+  if (pts.length < 5) return false;
+  const score = (dx, dy) => { let n = 0; for (const p of pts) if (red(p[0] + dx, p[1] + dy) && red(p[2] + dx, p[3] + dy)) n++; return n; };
+  let best = [0, 0], bs = -1;
+  for (let dy = -160; dy <= 160; dy += 2) for (let dx = -80; dx <= 80; dx += 2) { const v = score(dx, dy); if (v > bs) { bs = v; best = [dx, dy]; } }
+  const [cx, cy] = best;
+  for (let dy = cy - 1; dy <= cy + 1; dy++) for (let dx = cx - 1; dx <= cx + 1; dx++) { const v = score(dx, dy); if (v > bs) { bs = v; best = [dx, dy]; } }
+  if (bs < pts.length * 0.8) return false;
+  const [dx, dy] = best;
+  boxes.cells.forEach(b => { if (b) { b[0] += dx; b[2] += dx; b[1] += dy; b[3] += dy; } });
+  boxes.cols = boxes.cols.map(x => x + dx); boxes.rows = boxes.rows.map(y => y + dy);
+  boxes.w = w; boxes.h = h;
+  return true;
+}
 function stopTracking() {
   if (state.track) clearInterval(state.track.timer);
   state.track = null; state.live = null; setLive("");
 }
 function setLive(t) { $("live").textContent = t; $("live").hidden = !t; }
 
+// which planned move removes each apple (-1: none). A rectangle may span apples that earlier
+// moves remove, so each apple belongs to the first move whose rectangle covers it.
+function owners() {
+  const { R, C, board, moves } = state, owner = new Int32Array(R * C).fill(-1);
+  moves.forEach((m, i) => {
+    for (let r = m[0]; r <= m[2]; r++) for (let c = m[1]; c <= m[3]; c++) if (board[r * C + c] && owner[r * C + c] < 0) owner[r * C + c] = i;
+  });
+  return owner;
+}
+// Taking whole planned rectangles out of order is harmless; the board has left the plan only when
+// an apple outside the plan is gone or a planned rectangle is only partly gone.
+function offPlan() {
+  if (!state.live || !state.moves.length) return false;
+  const owner = owners(), gone = new Int32Array(state.moves.length), size = new Int32Array(state.moves.length);
+  for (let i = 0; i < owner.length; i++) {
+    if (!state.board[i]) continue;
+    if (owner[i] < 0) { if (state.live[i]) return true; continue; }
+    size[owner[i]]++; if (state.live[i]) gone[owner[i]]++;
+  }
+  return gone.some((g, k) => g > 0 && g < size[k]);
+}
 const moveDone = m => {
   for (let r = m[0]; r <= m[2]; r++) for (let c = m[1]; c <= m[3]; c++) {
     const i = r * state.C + c;
@@ -182,20 +238,39 @@ async function autoRun() {
     // Drag the whole plan, then look at the real board: apples a drag missed are still there, so
     // re-solve from what is left (1 s search) and drag again until no rectangle is left or nothing changes.
     let total = 0, round = 1;
+    let still = 0; // rounds in a row that changed nothing
+    const stat = { missed: 0, partial: 0, extra: 0 }; // drags that removed nothing / part of their apples; apples gone outside any drag
     for (;;) {
-      total += await dragAll(dbg, boxes, k, round);
+      const dragged = await dragAll(dbg, boxes, k, round);
+      total += dragged.length;
       if (auto.stop) break;
       await sleep(1000); // removal animation
       const r = await readBoard(tab, boxes, i => !state.board[i]);
       if (r.error) throw new Error(r.error);
-      if (!r.absent.length) throw new Error("드래그가 게임에 반영되지 않았습니다. 게임 화면이 처음 캡처한 위치 그대로인지 확인해 주세요.");
+      if (!r.absent.length) {
+        stat.missed += dragged.length;
+        if (++still >= 3) throw new Error("드래그가 게임에 반영되지 않았습니다. 게임 화면이 처음 캡처한 위치 그대로인지 확인해 주세요.");
+        round++;
+        continue; // same plan again
+      }
+      still = 0;
+      const owner = owners(), isGone = new Uint8Array(owner.length), mine = new Set(dragged);
+      for (const i of r.absent) isGone[i] = 1;
+      for (const k2 of dragged) {
+        let g = 0, n = 0;
+        owner.forEach((o, i) => { if (o === k2) { n++; g += isGone[i]; } });
+        if (!g) stat.missed++; else if (g < n) stat.partial++;
+      }
+      for (const i of r.absent) if (!mine.has(owner[i])) stat.extra++;
       for (const i of r.absent) { state.board[i] = 0; state.base++; }
       if (state.live) state.live.fill(0);
+      state.offTicks = 0;
       buildBoard();
       await solve(`${++round}번째 바퀴 · `, 1000);
       if (!state.moves.length) break;
     }
-    setStatus(auto.stop ? `자동 실행을 멈췄습니다 (${total}수 드래그).` : `자동 실행 완료: ${state.base}점 · ${round}바퀴 · ${total}수 드래그.`);
+    const diag = ` 놓친 드래그 ${stat.missed} · 일부만 지워진 드래그 ${stat.partial} · 계획 밖에서 지워진 사과 ${stat.extra}`;
+    setStatus((auto.stop ? `자동 실행을 멈췄습니다 (${total}수 드래그).` : `자동 실행 완료: ${state.base}점 · ${round}바퀴 · ${total}수 드래그.`) + diag);
   } catch (e) {
     setStatus("자동 실행 오류: " + e.message, true);
   } finally {
@@ -221,17 +296,18 @@ async function dragAll(dbg, boxes, k, round) {
   const { rows, cols } = boxes;
   const px = cols.length > 1 ? (cols[cols.length - 1] - cols[0]) / (cols.length - 1) : 40;
   const py = rows.length > 1 ? (rows[rows.length - 1] - rows[0]) / (rows.length - 1) : 40;
-  const order = state.steps.slice(state.step).flat();
+  const order = state.steps.slice(state.step).flat(), done = [];
   let n = 0;
   for (const i of order) {
     if (auto.stop) break;
+    done.push(i);
     const m = state.moves[i];
     // from just outside the top-left apple to just outside the bottom-right one, staying clear of neighbours
     await drag(dbg, (cols[m[1]] - px * 0.45) * k, (rows[m[0]] - py * 0.45) * k, (cols[m[3]] + px * 0.45) * k, (rows[m[2]] + py * 0.45) * k);
     setStatus(`${round}번째 바퀴 · 자동 드래그 ${++n} / ${order.length}`);
     await sleep(+$("gap").value);
   }
-  return n;
+  return done;
 }
 async function drag(dbg, x1, y1, x2, y2) {
   const send = (type, x, y, extra) => chrome.debugger.sendCommand(dbg, "Input.dispatchMouseEvent", { type, x, y, ...extra });
@@ -292,15 +368,7 @@ function render() {
     for (let r = m[0]; r <= m[2]; r++) for (let c = m[1]; c <= m[3]; c++) gone[r * C + c] = 1;
   });
   // an apple gone that the plan only removes in a later step means the board left the plan
-  let off = false;
-  if (state.live) {
-    const owner = new Int32Array(R * C).fill(-1);
-    moves.forEach((m, i) => {
-      for (let r = m[0]; r <= m[2]; r++) for (let c = m[1]; c <= m[3]; c++) if (board[r * C + c] && owner[r * C + c] < 0) owner[r * C + c] = i;
-    });
-    gone.forEach((g, i) => { if (g && (owner[i] < 0 || stepOf[owner[i]] > step)) off = true; });
-  }
-  $("off").hidden = !off;
+  $("off").hidden = !(state.live && state.offTicks >= 3);
   const el = $("board");
   el.querySelectorAll(".cell").forEach(b => {
     const i = +b.dataset.i, v = board[i];
@@ -344,7 +412,7 @@ $("next").onclick = () => go(1);
 $("prev").onclick = () => go(-1);
 $("resolve").onclick = () => {
   if (state.solving || !state.board.length) return;
-  if (state.live) { state.live.forEach((g, i) => { if (g && state.board[i]) { state.board[i] = 0; state.base++; } }); state.live.fill(0); buildBoard(); }
+  if (state.live) { state.live.forEach((g, i) => { if (g && state.board[i]) { state.board[i] = 0; state.base++; } }); state.live.fill(0); state.offTicks = 0; buildBoard(); }
   solve("현재 판 · ");
 };
 $("moves").onclick = e => { const li = e.target.closest("li"); if (li) { state.step = state.steps.findIndex(s => s.includes(+li.dataset.k)); render(); } };
