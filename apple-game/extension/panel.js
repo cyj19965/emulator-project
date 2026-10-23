@@ -1,15 +1,23 @@
 const $ = id => document.getElementById(id);
-const state = { R: 10, C: 17, board: [], low: new Set(), moves: [], steps: [], score: 0, step: 0, sel: -1, solving: false };
+const state = { R: 10, C: 17, board: [], low: new Set(), moves: [], steps: [], score: 0, step: 0, sel: -1, solving: false,
+  live: null, track: null, base: 0 }; // base: apples already removed before a re-solve
 const NW = Math.max(1, Math.min(8, navigator.hardwareConcurrency || 4));
+// the game tab this window works on (set from the icon click that opened it)
+const q = new URLSearchParams(location.search);
+const target = { tabId: +q.get("tab") || null, windowId: +q.get("win") || null };
 
 // ---------- capture & recognition ----------
 async function captureAndSolve() {
   setStatus("캡처 중…");
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) return setStatus("현재 탭을 찾지 못했습니다.", true);
+    const tab = target.tabId && await chrome.tabs.get(target.tabId).catch(() => null);
+    if (!tab) return setStatus("게임 탭을 찾지 못했습니다. 게임 탭에서 확장프로그램 아이콘을 다시 눌러 주세요.", true);
+    if (!tab.active) return setStatus("게임 탭이 그 창에서 선택된 상태여야 캡처할 수 있습니다.", true);
+    chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ["content.js"] }).catch(() => {});
+    stopTracking(); state.base = 0;
     const url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    await handleImage(await (await fetch(url)).blob());
+    const boxes = await handleImage(await (await fetch(url)).blob());
+    if (boxes) startTracking(tab, boxes);
   } catch (e) {
     setStatus("캡처하지 못했습니다: " + e.message, true);
   }
@@ -23,12 +31,75 @@ async function handleImage(blob) {
   const g = findApples(ctx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height);
   if (!g) return setStatus("사과를 찾지 못했습니다. 게임 판 전체가 화면에 보이게 해 주세요.", true);
   const R = g.rows.length, C = g.cols.length, board = new Array(R * C).fill(0), low = new Set();
+  const boxes = { w: cv.width, h: cv.height, cells: new Array(R * C).fill(null) };
   for (const a of g.apples) {
     const r = classify(a.f), i = a.row * C + a.col;
     board[i] = r.digit;
     if (r.margin < 1.2) low.add(i);
+    boxes.cells[i] = [a.x0, a.y0, a.x1, a.y1];
   }
   loadBoard(board, R, C, low, `인식 ${g.apples.length}개 (${R}×${C})`);
+  return boxes;
+}
+
+// ---------- live tracking ----------
+// Re-captures the game tab and marks an apple gone once its spot has no red in two reads in a row.
+// Chrome allows about two captures per second, so this polls every 600 ms.
+function startTracking(tab, boxes) {
+  state.live = new Uint8Array(state.R * state.C);
+  const miss = new Uint8Array(state.R * state.C);
+  const tick = async () => {
+    if (!state.track || state.track.busy) return;
+    state.track.busy = true;
+    try {
+      const [cur] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+      if (!cur || cur.id !== tab.id) return setLive("게임 탭이 앞에 있을 때만 판을 따라갑니다.");
+      const url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
+      const bmp = await createImageBitmap(await (await fetch(url)).blob());
+      if (bmp.width !== boxes.w || bmp.height !== boxes.h) return setLive("창 크기가 바뀌었습니다. 「캡처 & 풀기」를 다시 눌러 주세요.");
+      const cv = new OffscreenCanvas(bmp.width, bmp.height), ctx = cv.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(bmp, 0, 0);
+      const absent = [];
+      let present = 0;
+      boxes.cells.forEach((b, i) => {
+        if (!b || state.live[i]) return;
+        const d = ctx.getImageData(b[0], b[1], b[2] - b[0] + 1, b[3] - b[1] + 1).data;
+        let red = 0, n = 0;
+        for (let p = 0; p < d.length; p += 12) { n++; if (d[p] > 150 && d[p] - d[p + 1] > 90 && d[p] - d[p + 2] > 90) red++; }
+        if (red / n < 0.15) absent.push(i); else present++;
+      });
+      // a single drag removes few apples; a mass disappearance means the board is hidden or scrolled
+      if (absent.length > 20 && absent.length > present) return setLive("판이 보이지 않습니다. 스크롤이나 창을 처음 캡처한 상태로 돌려 주세요.");
+      setLive("");
+      let changed = false;
+      for (let i = 0; i < miss.length; i++) miss[i] = absent.includes(i) ? miss[i] + 1 : 0;
+      for (const i of absent) if (miss[i] >= 2 && !state.live[i]) { state.live[i] = 1; changed = true; }
+      if (changed) { autoStep(); render(); }
+    } catch (e) {
+      setLive("판을 따라가지 못했습니다: " + e.message);
+    } finally {
+      if (state.track) state.track.busy = false;
+    }
+  };
+  state.track = { timer: setInterval(tick, 600), busy: false };
+}
+function stopTracking() {
+  if (state.track) clearInterval(state.track.timer);
+  state.track = null; state.live = null; setLive("");
+}
+function setLive(t) { $("live").textContent = t; $("live").hidden = !t; }
+
+const moveDone = m => {
+  for (let r = m[0]; r <= m[2]; r++) for (let c = m[1]; c <= m[3]; c++) {
+    const i = r * state.C + c;
+    if (state.board[i] && !state.live[i]) return false;
+  }
+  return true;
+};
+// with live tracking the current step is the first one that still has an apple left
+function autoStep() {
+  const k = state.steps.findIndex(s => s.some(i => !moveDone(state.moves[i])));
+  state.step = k < 0 ? state.steps.length : k;
 }
 
 // ---------- solving ----------
@@ -55,6 +126,7 @@ function solve(prefix = "") {
       w.terminate();
       if (--left === 0) {
         state.solving = false; state.moves = orderMoves(best.moves); state.steps = buildSteps(state.moves); state.score = best.score; state.step = 0;
+        if (state.live) autoStep();
         $("capture").disabled = $("resolve").disabled = false;
         setStatus(`${prefix}${((performance.now() - t0) / 1000).toFixed(1)}초 탐색 · ${best.moves.length}수`);
         render();
@@ -107,11 +179,23 @@ function render() {
   const gone = new Uint8Array(R * C), stepOf = [];
   steps.forEach((s, k) => s.forEach(i => { stepOf[i] = k; }));
   let removed = 0;
-  moves.forEach((m, i) => {
+  if (state.live) {
+    state.live.forEach((g, i) => { if (g && board[i]) { gone[i] = 1; removed++; } });
+  } else moves.forEach((m, i) => {
     if (stepOf[i] >= step) return;
     removed += m[4];
     for (let r = m[0]; r <= m[2]; r++) for (let c = m[1]; c <= m[3]; c++) gone[r * C + c] = 1;
   });
+  // an apple gone that the plan only removes in a later step means the board left the plan
+  let off = false;
+  if (state.live) {
+    const owner = new Int32Array(R * C).fill(-1);
+    moves.forEach((m, i) => {
+      for (let r = m[0]; r <= m[2]; r++) for (let c = m[1]; c <= m[3]; c++) if (board[r * C + c] && owner[r * C + c] < 0) owner[r * C + c] = i;
+    });
+    gone.forEach((g, i) => { if (g && (owner[i] < 0 || stepOf[owner[i]] > step)) off = true; });
+  }
+  $("off").hidden = !off;
   const el = $("board");
   el.querySelectorAll(".cell").forEach(b => {
     const i = +b.dataset.i, v = board[i];
@@ -124,13 +208,14 @@ function render() {
     d.style.gridArea = `${m[0] + 1} / ${m[1] + 1} / ${m[2] + 2} / ${m[3] + 2}`;
     el.appendChild(d);
   };
-  (steps[step] || []).forEach(i => place("now", moves[i]));
+  (steps[step] || []).forEach(i => { if (!state.live || !moveDone(moves[i])) place("now", moves[i]); });
   (steps[step + 1] || []).forEach(i => place("next", moves[i]));
   const total = board.filter(v => v).length;
-  $("score").innerHTML = state.solving ? `… <small>/ ${total}</small>` : board.length ? `${state.score} <small>/ ${total}</small>` : "– <small>/ –</small>";
-  $("stepinfo").textContent = steps.length ? `${Math.min(step + 1, steps.length)} / ${steps.length} 단계 · 현재 ${removed}점` : (state.solving ? "탐색 중…" : "–");
-  const cur = (steps[step] || []).map(i => moves[i]);
-  $("cur").textContent = cur.length > 1 ? `꽉 찬 사각형 ${cur.length}개 한꺼번에 · 사과 ${cur.reduce((a, m) => a + m[4], 0)}개`
+  const base = state.base, all = base + total;
+  $("score").innerHTML = state.solving ? `… <small>/ ${all}</small>` : board.length ? `${base + state.score} <small>/ ${all}</small>` : "– <small>/ –</small>";
+  $("stepinfo").textContent = steps.length ? `${Math.min(step + 1, steps.length)} / ${steps.length} 단계 · 현재 ${base + removed}점` : (state.solving ? "탐색 중…" : "–");
+  const cur = (steps[step] || []).map(i => moves[i]).filter(m => !state.live || !moveDone(m));
+  $("cur").textContent = cur.length > 1 ? `꽉 찬 사각형 ${cur.length}개 (순서 상관없음) · 사과 ${cur.reduce((a, m) => a + m[4], 0)}개`
     : cur.length ? `${cur[0][0] + 1}~${cur[0][2] + 1}행, ${cur[0][1] + 1}~${cur[0][3] + 1}열 · 사과 ${cur[0][4]}개`
     : (moves.length ? "끝. 더 지울 수 있는 사각형이 없습니다." : "–");
   $("prev").disabled = step === 0; $("next").disabled = step >= steps.length;
@@ -144,10 +229,18 @@ function render() {
 
 function go(d) { const s = Math.max(0, Math.min(state.steps.length, state.step + d)); if (s !== state.step) { state.step = s; render(); } }
 $("capture").onclick = captureAndSolve;
-chrome.runtime.onMessage.addListener(msg => { if (msg.cmd === "next") go(1); else if (msg.cmd === "prev") go(-1); });
+chrome.runtime.onMessage.addListener(msg => {
+  if (msg.cmd === "next") go(1);
+  else if (msg.cmd === "prev") go(-1);
+  else if (msg.cmd === "target") { target.tabId = msg.tabId; target.windowId = msg.windowId; setStatus("게임 탭을 다시 지정했습니다. 「캡처 & 풀기」를 누르세요."); }
+});
 $("next").onclick = () => go(1);
 $("prev").onclick = () => go(-1);
-$("resolve").onclick = () => { if (!state.solving && state.board.length) solve(); };
+$("resolve").onclick = () => {
+  if (state.solving || !state.board.length) return;
+  if (state.live) { state.live.forEach((g, i) => { if (g && state.board[i]) { state.board[i] = 0; state.base++; } }); state.live.fill(0); buildBoard(); }
+  solve("현재 판 · ");
+};
 $("moves").onclick = e => { const li = e.target.closest("li"); if (li) { state.step = state.steps.findIndex(s => s.includes(+li.dataset.k)); render(); } };
 $("board").onclick = e => {
   const b = e.target.closest(".cell"); if (!b) return;
