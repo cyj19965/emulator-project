@@ -7,6 +7,13 @@ const q = new URLSearchParams(location.search);
 const target = { tabId: +q.get("tab") || null, windowId: +q.get("win") || null };
 
 // ---------- capture & recognition ----------
+// Chrome allows about two captures per second; wait and retry when over that limit.
+async function captureTab(windowId, opts) {
+  for (let t = 0; ; t++) {
+    try { return await chrome.tabs.captureVisibleTab(windowId, opts); }
+    catch (e) { if (t >= 5 || !/MAX_CAPTURE/.test(e.message)) throw e; await new Promise(r => setTimeout(r, 600)); }
+  }
+}
 async function captureAndSolve() {
   setStatus("캡처 중…");
   try {
@@ -15,7 +22,7 @@ async function captureAndSolve() {
     if (!tab.active) return setStatus("게임 탭이 그 창에서 선택된 상태여야 캡처할 수 있습니다.", true);
     chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ["content.js"] }).catch(() => {});
     stopTracking(); state.base = 0;
-    const url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    const url = await captureTab(tab.windowId, { format: "png" });
     const boxes = await handleImage(await (await fetch(url)).blob());
     if (boxes) startTracking(tab, boxes);
     return boxes;
@@ -55,20 +62,9 @@ function startTracking(tab, boxes) {
     try {
       const [cur] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
       if (!cur || cur.id !== tab.id) return setLive("게임 탭이 앞에 있을 때만 판을 따라갑니다.");
-      const url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 70 });
-      const bmp = await createImageBitmap(await (await fetch(url)).blob());
-      if (bmp.width !== boxes.w || bmp.height !== boxes.h) return setLive("창 크기가 바뀌었습니다. 「캡처 & 풀기」를 다시 눌러 주세요.");
-      const cv = new OffscreenCanvas(bmp.width, bmp.height), ctx = cv.getContext("2d", { willReadFrequently: true });
-      ctx.drawImage(bmp, 0, 0);
-      const absent = [];
-      let present = 0;
-      boxes.cells.forEach((b, i) => {
-        if (!b || state.live[i]) return;
-        const d = ctx.getImageData(b[0], b[1], b[2] - b[0] + 1, b[3] - b[1] + 1).data;
-        let red = 0, n = 0;
-        for (let p = 0; p < d.length; p += 12) { n++; if (d[p] > 150 && d[p] - d[p + 1] > 90 && d[p] - d[p + 2] > 90) red++; }
-        if (red / n < 0.15) absent.push(i); else present++;
-      });
+      const r = await readBoard(tab, boxes, i => state.live[i]);
+      if (r.error) return setLive(r.error);
+      const { absent, present } = r;
       // a single drag removes few apples; a mass disappearance means the board is hidden or scrolled
       if (absent.length > 20 && absent.length > present) return setLive("판이 보이지 않습니다. 스크롤이나 창을 처음 캡처한 상태로 돌려 주세요.");
       setLive("");
@@ -83,6 +79,24 @@ function startTracking(tab, boxes) {
     }
   };
   state.track = { timer: setInterval(tick, 600), busy: false };
+}
+// captures the tab and lists the apple spots (from the first capture) that no longer show red
+async function readBoard(tab, boxes, skip = () => false) {
+  const url = await captureTab(tab.windowId, { format: "jpeg", quality: 70 });
+  const bmp = await createImageBitmap(await (await fetch(url)).blob());
+  if (bmp.width !== boxes.w || bmp.height !== boxes.h) return { error: "창 크기가 바뀌었습니다. 「캡처 & 풀기」를 다시 눌러 주세요." };
+  const cv = new OffscreenCanvas(bmp.width, bmp.height), ctx = cv.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(bmp, 0, 0);
+  const absent = [];
+  let present = 0;
+  boxes.cells.forEach((b, i) => {
+    if (!b || skip(i)) return;
+    const d = ctx.getImageData(b[0], b[1], b[2] - b[0] + 1, b[3] - b[1] + 1).data;
+    let red = 0, n = 0;
+    for (let p = 0; p < d.length; p += 12) { n++; if (d[p] > 150 && d[p] - d[p + 1] > 90 && d[p] - d[p + 2] > 90) red++; }
+    if (red / n < 0.15) absent.push(i); else present++;
+  });
+  return { absent, present };
 }
 function stopTracking() {
   if (state.track) clearInterval(state.track.timer);
@@ -112,9 +126,9 @@ function orderMoves(moves) {
   return first.concat(moves.filter(m => !solid(m)));
 }
 
-function solve(prefix = "") {
+function solve(prefix = "", budget = +$("budget").value) {
   const { R, C, board } = state;
-  const budget = +$("budget").value, deadline = Date.now() + budget, t0 = performance.now();
+  const deadline = Date.now() + budget, t0 = performance.now();
   state.solving = true; state.moves = []; state.steps = []; state.step = 0; render();
   setStatus(`탐색 중… (${budget / 1000}초)`);
   $("capture").disabled = $("resolve").disabled = true;
@@ -155,25 +169,33 @@ async function autoRun() {
   $("auto").textContent = "자동 실행 중지";
   try {
     await chrome.debugger.attach(dbg, "1.3");
-    await sleep(800);
+    const view = await waitStable(dbg);
     const boxes = await captureAndSolve();
-    if (!boxes || !state.moves.length) throw new Error("풀이를 만들지 못했습니다.");
-    const { result } = await chrome.debugger.sendCommand(dbg, "Runtime.evaluate", { expression: "innerWidth", returnByValue: true });
-    const k = result.value / boxes.w; // captured pixels -> CSS pixels
-    const { rows, cols } = boxes;
-    const px = cols.length > 1 ? (cols[cols.length - 1] - cols[0]) / (cols.length - 1) : 40;
-    const py = rows.length > 1 ? (rows[rows.length - 1] - rows[0]) / (rows.length - 1) : 40;
-    const order = state.steps.slice(state.step).flat();
-    let n = 0;
-    for (const i of order) {
+    if (!boxes) throw new Error("판을 인식하지 못했습니다.");
+    if (state.R !== 10 || state.C !== 17)
+      throw new Error(`판이 ${state.R}행 × ${state.C}열만 보입니다. 디버깅 안내 띠 때문에 화면이 줄었을 수 있으니, 창을 키우거나 스크롤해서 판 전체가 보이게 한 뒤 다시 눌러 주세요.`);
+    if (!state.moves.length) throw new Error("풀이를 만들지 못했습니다.");
+    // captured pixels -> CSS pixels. devicePixelRatio (includes page zoom) is not thrown off by a
+    // scrollbar the way innerWidth is; fall back to the width ratio if the capture was scaled.
+    const kDpr = 1 / view.dpr, kW = view.w / boxes.w;
+    const k = Math.abs(boxes.w * kDpr - view.w) <= 40 ? kDpr : kW;
+    // Drag the whole plan, then look at the real board: apples a drag missed are still there, so
+    // re-solve from what is left (1 s search) and drag again until no rectangle is left or nothing changes.
+    let total = 0, round = 1;
+    for (;;) {
+      total += await dragAll(dbg, boxes, k, round);
       if (auto.stop) break;
-      const m = state.moves[i];
-      // from just outside the top-left apple to just outside the bottom-right one, staying clear of neighbours
-      await drag(dbg, (cols[m[1]] - px * 0.45) * k, (rows[m[0]] - py * 0.45) * k, (cols[m[3]] + px * 0.45) * k, (rows[m[2]] + py * 0.45) * k);
-      setStatus(`자동 드래그 ${++n} / ${order.length}`);
-      await sleep(+$("gap").value);
+      await sleep(1000); // removal animation
+      const r = await readBoard(tab, boxes, i => !state.board[i]);
+      if (r.error) throw new Error(r.error);
+      if (!r.absent.length) throw new Error("드래그가 게임에 반영되지 않았습니다. 게임 화면이 처음 캡처한 위치 그대로인지 확인해 주세요.");
+      for (const i of r.absent) { state.board[i] = 0; state.base++; }
+      if (state.live) state.live.fill(0);
+      buildBoard();
+      await solve(`${++round}번째 바퀴 · `, 1000);
+      if (!state.moves.length) break;
     }
-    setStatus(auto.stop ? `자동 실행을 멈췄습니다 (${n}수 드래그).` : `자동 드래그 완료 (${n}수).`);
+    setStatus(auto.stop ? `자동 실행을 멈췄습니다 (${total}수 드래그).` : `자동 실행 완료: ${state.base}점 · ${round}바퀴 · ${total}수 드래그.`);
   } catch (e) {
     setStatus("자동 실행 오류: " + e.message, true);
   } finally {
@@ -181,6 +203,35 @@ async function autoRun() {
     auto.running = false;
     $("auto").textContent = "자동 실행";
   }
+}
+// waits until the viewport stops changing (the debugging bar slides in after attaching)
+async function waitStable(dbg) {
+  const read = async () => (await chrome.debugger.sendCommand(dbg, "Runtime.evaluate",
+    { expression: "[innerWidth, innerHeight, devicePixelRatio]", returnByValue: true })).result.value;
+  let last = await read(), same = 0;
+  for (let t = 0; t < 25 && same < 4; t++) {
+    await sleep(200);
+    const v = await read();
+    same = v.join() === last.join() ? same + 1 : 0;
+    last = v;
+  }
+  return { w: last[0], h: last[1], dpr: last[2] };
+}
+async function dragAll(dbg, boxes, k, round) {
+  const { rows, cols } = boxes;
+  const px = cols.length > 1 ? (cols[cols.length - 1] - cols[0]) / (cols.length - 1) : 40;
+  const py = rows.length > 1 ? (rows[rows.length - 1] - rows[0]) / (rows.length - 1) : 40;
+  const order = state.steps.slice(state.step).flat();
+  let n = 0;
+  for (const i of order) {
+    if (auto.stop) break;
+    const m = state.moves[i];
+    // from just outside the top-left apple to just outside the bottom-right one, staying clear of neighbours
+    await drag(dbg, (cols[m[1]] - px * 0.45) * k, (rows[m[0]] - py * 0.45) * k, (cols[m[3]] + px * 0.45) * k, (rows[m[2]] + py * 0.45) * k);
+    setStatus(`${round}번째 바퀴 · 자동 드래그 ${++n} / ${order.length}`);
+    await sleep(+$("gap").value);
+  }
+  return n;
 }
 async function drag(dbg, x1, y1, x2, y2) {
   const send = (type, x, y, extra) => chrome.debugger.sendCommand(dbg, "Input.dispatchMouseEvent", { type, x, y, ...extra });
