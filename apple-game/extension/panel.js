@@ -352,11 +352,21 @@ async function dragAll(dbg, boxes, k, round) {
   }
   return done;
 }
+// Paced like a hand drag. The game reads the pointer once per frame: moves sent all at once let it
+// take the release while its selection was still part-way along the path, selecting the wrong apples.
 async function drag(dbg, x1, y1, x2, y2) {
   const send = (type, x, y, extra) => chrome.debugger.sendCommand(dbg, "Input.dispatchMouseEvent", { type, x, y, ...extra });
   await send("mouseMoved", x1, y1, { button: "none" });
+  await sleep(20);
   await send("mousePressed", x1, y1, { button: "left", buttons: 1, clickCount: 1 });
-  for (let s = 1; s <= 4; s++) await send("mouseMoved", x1 + (x2 - x1) * s / 4, y1 + (y2 - y1) * s / 4, { button: "left", buttons: 1 });
+  await sleep(20);
+  for (let s = 1; s <= 6; s++) {
+    await send("mouseMoved", x1 + (x2 - x1) * s / 6, y1 + (y2 - y1) * s / 6, { button: "left", buttons: 1 });
+    await sleep(16);
+  }
+  await sleep(50); // let a few frames see the final position before releasing
+  await send("mouseMoved", x2, y2, { button: "left", buttons: 1 });
+  await sleep(20);
   await send("mouseReleased", x2, y2, { button: "left", buttons: 0, clickCount: 1 });
 }
 chrome.debugger.onDetach.addListener(() => { if (auto.running) auto.stop = true; });
