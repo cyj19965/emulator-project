@@ -18,6 +18,7 @@ async function captureAndSolve() {
     const url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
     const boxes = await handleImage(await (await fetch(url)).blob());
     if (boxes) startTracking(tab, boxes);
+    return boxes;
   } catch (e) {
     setStatus("캡처하지 못했습니다: " + e.message, true);
   }
@@ -31,14 +32,14 @@ async function handleImage(blob) {
   const g = findApples(ctx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height);
   if (!g) return setStatus("사과를 찾지 못했습니다. 게임 판 전체가 화면에 보이게 해 주세요.", true);
   const R = g.rows.length, C = g.cols.length, board = new Array(R * C).fill(0), low = new Set();
-  const boxes = { w: cv.width, h: cv.height, cells: new Array(R * C).fill(null) };
+  const boxes = { w: cv.width, h: cv.height, rows: g.rows, cols: g.cols, cells: new Array(R * C).fill(null) };
   for (const a of g.apples) {
     const r = classify(a.f), i = a.row * C + a.col;
     board[i] = r.digit;
     if (r.margin < 1.2) low.add(i);
     boxes.cells[i] = [a.x0, a.y0, a.x1, a.y1];
   }
-  loadBoard(board, R, C, low, `인식 ${g.apples.length}개 (${R}×${C})`);
+  await loadBoard(board, R, C, low, `인식 ${g.apples.length}개 (${R}×${C})`);
   return boxes;
 }
 
@@ -117,7 +118,8 @@ function solve(prefix = "") {
   state.solving = true; state.moves = []; state.steps = []; state.step = 0; render();
   setStatus(`탐색 중… (${budget / 1000}초)`);
   $("capture").disabled = $("resolve").disabled = true;
-  let left = NW, best = { score: -1, moves: [] }, runs = 0;
+  let left = NW, best = { score: -1, moves: [] }, runs = 0, done;
+  const finished = new Promise(res => { done = res; });
   for (let k = 0; k < NW; k++) {
     const w = new Worker("worker.js");
     w.onmessage = e => {
@@ -130,12 +132,64 @@ function solve(prefix = "") {
         $("capture").disabled = $("resolve").disabled = false;
         setStatus(`${prefix}${((performance.now() - t0) / 1000).toFixed(1)}초 탐색 · ${best.moves.length}수`);
         render();
+        done();
       }
     };
     w.onerror = e => setStatus("탐색 오류: " + e.message, true);
     w.postMessage({ board, R, C, deadline });
   }
+  return finished;
 }
+
+// ---------- auto drag ----------
+// Drags through chrome.debugger (Input.dispatchMouseEvent), which the page sees as real mouse input.
+// Attaching shows Chrome's "debugging" bar and can shift the page, so the board is captured after attaching.
+const auto = { running: false, stop: false };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function autoRun() {
+  if (auto.running) { auto.stop = true; return; }
+  const tab = target.tabId && await chrome.tabs.get(target.tabId).catch(() => null);
+  if (!tab) return setStatus("게임 탭을 찾지 못했습니다. 게임 탭에서 확장프로그램 아이콘을 다시 눌러 주세요.", true);
+  const dbg = { tabId: tab.id };
+  Object.assign(auto, { running: true, stop: false });
+  $("auto").textContent = "자동 실행 중지";
+  try {
+    await chrome.debugger.attach(dbg, "1.3");
+    await sleep(800);
+    const boxes = await captureAndSolve();
+    if (!boxes || !state.moves.length) throw new Error("풀이를 만들지 못했습니다.");
+    const { result } = await chrome.debugger.sendCommand(dbg, "Runtime.evaluate", { expression: "innerWidth", returnByValue: true });
+    const k = result.value / boxes.w; // captured pixels -> CSS pixels
+    const { rows, cols } = boxes;
+    const px = cols.length > 1 ? (cols[cols.length - 1] - cols[0]) / (cols.length - 1) : 40;
+    const py = rows.length > 1 ? (rows[rows.length - 1] - rows[0]) / (rows.length - 1) : 40;
+    const order = state.steps.slice(state.step).flat();
+    let n = 0;
+    for (const i of order) {
+      if (auto.stop) break;
+      const m = state.moves[i];
+      // from just outside the top-left apple to just outside the bottom-right one, staying clear of neighbours
+      await drag(dbg, (cols[m[1]] - px * 0.45) * k, (rows[m[0]] - py * 0.45) * k, (cols[m[3]] + px * 0.45) * k, (rows[m[2]] + py * 0.45) * k);
+      setStatus(`자동 드래그 ${++n} / ${order.length}`);
+      await sleep(+$("gap").value);
+    }
+    setStatus(auto.stop ? `자동 실행을 멈췄습니다 (${n}수 드래그).` : `자동 드래그 완료 (${n}수).`);
+  } catch (e) {
+    setStatus("자동 실행 오류: " + e.message, true);
+  } finally {
+    chrome.debugger.detach(dbg).catch(() => {});
+    auto.running = false;
+    $("auto").textContent = "자동 실행";
+  }
+}
+async function drag(dbg, x1, y1, x2, y2) {
+  const send = (type, x, y, extra) => chrome.debugger.sendCommand(dbg, "Input.dispatchMouseEvent", { type, x, y, ...extra });
+  await send("mouseMoved", x1, y1, { button: "none" });
+  await send("mousePressed", x1, y1, { button: "left", buttons: 1, clickCount: 1 });
+  for (let s = 1; s <= 4; s++) await send("mouseMoved", x1 + (x2 - x1) * s / 4, y1 + (y2 - y1) * s / 4, { button: "left", buttons: 1 });
+  await send("mouseReleased", x2, y2, { button: "left", buttons: 0, clickCount: 1 });
+}
+chrome.debugger.onDetach.addListener(() => { if (auto.running) auto.stop = true; });
 
 // ---------- UI ----------
 function setStatus(t, err) { $("status").textContent = t; $("status").classList.toggle("err", !!err); }
@@ -148,7 +202,7 @@ function loadBoard(board, R, C, low, msg) {
   if (low.size) warn.push(`확신도 낮은 칸 ${low.size}개 (주황 테두리). 실제 숫자와 비교해 주세요.`);
   $("warn").hidden = !warn.length; $("warn").textContent = warn.join(" ");
   buildBoard();
-  solve(msg + " · ");
+  return solve(msg + " · ");
 }
 
 function buildBoard() {
@@ -229,6 +283,7 @@ function render() {
 
 function go(d) { const s = Math.max(0, Math.min(state.steps.length, state.step + d)); if (s !== state.step) { state.step = s; render(); } }
 $("capture").onclick = captureAndSolve;
+$("auto").onclick = autoRun;
 chrome.runtime.onMessage.addListener(msg => {
   if (msg.cmd === "next") go(1);
   else if (msg.cmd === "prev") go(-1);
